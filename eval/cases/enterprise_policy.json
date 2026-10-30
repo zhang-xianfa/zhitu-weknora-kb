@@ -1,0 +1,86 @@
+{
+  "name": "企业制度类知识库 · 边界评测集",
+  "note": "脱敏后的等价问法。must_include 是必答要点，缺一即判不命中；unanswerable 为负例（资料里确实没有答案）。",
+  "cases": [
+    {
+      "id": "F-01",
+      "category": "事实型",
+      "question": "出差住宿一线城市普通员工的标准是多少？",
+      "must_include": ["500"],
+      "expected_source": "企业差旅与费用管理办法"
+    },
+    {
+      "id": "F-02",
+      "category": "事实型",
+      "question": "出差期间工作餐补贴每天多少？需要发票吗？",
+      "must_include": ["100", "不需要"],
+      "expected_source": "企业差旅与费用管理办法"
+    },
+    {
+      "id": "C-01",
+      "category": "条款型",
+      "question": "出差 9 天需要谁审批？",
+      "must_include": ["分管副总"],
+      "expected_source": "企业差旅与费用管理办法"
+    },
+    {
+      "id": "C-02",
+      "category": "条款型",
+      "question": "出差结束后多久之内要提交报销？",
+      "must_include": ["15"],
+      "expected_source": "企业差旅与费用管理办法"
+    },
+    {
+      "id": "C-03",
+      "category": "条款型",
+      "question": "紧急出差来不及事前审批怎么办？",
+      "must_include": ["24 小时", "补提"],
+      "expected_source": "企业差旅与费用管理办法"
+    },
+    {
+      "id": "M-01",
+      "category": "跨条款多跳",
+      "question": "实习生去二线城市出差 5 天，住宿和餐补大概能报多少？",
+      "must_include": ["折算"],
+      "expected_source": "企业差旅与费用管理办法"
+    },
+    {
+      "id": "M-02",
+      "category": "跨条款多跳",
+      "question": "如果出差 10 天没提前审批，费用还能报吗？",
+      "must_include": ["不予报销"],
+      "expected_source": "企业差旅与费用管理办法"
+    },
+    {
+      "id": "N-01",
+      "category": "无答案（负例）",
+      "question": "公司年假有多少天？",
+      "unanswerable": true
+    },
+    {
+      "id": "N-02",
+      "category": "无答案（负例）",
+      "question": "出差期间车辆违章罚款由谁承担？",
+      "unanswerable": true
+    },
+    {
+      "id": "N-03",
+      "category": "无答案（负例）",
+      "question": "海外出差的汇率怎么换算？",
+      "unanswerable": true
+    },
+    {
+      "id": "T-01",
+      "category": "时效与版本",
+      "question": "这份办法目前是第几版？什么时候生效？",
+      "must_include": ["版本"],
+      "expected_source": "企业差旅与费用管理办法"
+    },
+    {
+      "id": "T-02",
+      "category": "时效与版本",
+      "question": "住宿标准明年会调整吗？",
+      "unanswerable": true
+    }
+  ]
+}

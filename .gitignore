@@ -1,0 +1,20 @@
+# 环境与密钥
+.env
+*.key
+
+# 运行产物
+.weknora_state.json
+eval/report/
+*.jsonl
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# 部署时挂载的文档目录
+deploy/files/
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

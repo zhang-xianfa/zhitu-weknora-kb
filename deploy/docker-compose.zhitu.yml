@@ -1,0 +1,50 @@
+# 智途 POC 部署编排：在 WeKnora 官方 compose 基础上做三件事
+#   1. 镜像版本钉死，避免"昨天还好好的"；
+#   2. 模型、向量库、存储地址全部走环境变量，内网可替换；
+#   3. 给后端和解析服务加资源限额，防止单库灌爆机器。
+#
+# 用法：
+#   cp .env.example .env && 编辑
+#   docker compose -f docker-compose.zhitu.yml up -d
+#
+# 说明：镜像名与端口以 WeKnora 官方发布为准，升级上游时只改 WEKNORA_VERSION。
+
+services:
+  weknora:
+    image: ${WEKNORA_IMAGE:-wechatopenai/weknora:${WEKNORA_VERSION:-v0.9.0}}
+    container_name: zhitu-weknora
+    restart: unless-stopped
+    ports:
+      - "${WEKNORA_PORT:-8080}:8080"
+    environment:
+      # ── 模型：全部内网可替换，禁止默认外网地址上线 ──
+      LLM_BASE_URL: ${LLM_BASE_URL}
+      LLM_API_KEY: ${LLM_API_KEY}
+      LLM_MODEL: ${LLM_MODEL:-deepseek-chat}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
+      # ── 存储与数据库 ──
+      DATABASE_URL: ${DATABASE_URL}
+      VECTOR_STORE_TYPE: ${VECTOR_STORE_TYPE:-postgres}
+      STORAGE_TYPE: ${STORAGE_TYPE:-local}
+      # ── 运行参数 ──
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      MAX_CONCURRENT_PARSE: ${MAX_CONCURRENT_PARSE:-2}
+    volumes:
+      - weknora_data:/app/data
+      - ./files:/app/files
+    deploy:
+      resources:
+        limits:
+          cpus: "${CPU_LIMIT:-2}"
+          memory: ${MEM_LIMIT:-4g}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  weknora_data:
