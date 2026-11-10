@@ -16,26 +16,28 @@ class _Handler(BaseHTTPRequestHandler):
     #: [(status, headers, body_dict), ...]，按请求顺序消费；用完后全返回 200
     responses: list = []
     requests: list = []
+    #: 每次请求的原始 body：上传重试是否把完整文件重发，只能靠它验证
+    bodies: list = []
 
     def _handle(self) -> None:
         length = int(self.headers.get("Content-Length") or 0)
-        if length:
-            self.rfile.read(length)
+        body = self.rfile.read(length) if length else b""
         type(self).requests.append((self.command, self.path))
+        type(self).bodies.append(body)
 
         if type(self).responses:
-            status, headers, body = type(self).responses.pop(0)
+            status, headers, payload = type(self).responses.pop(0)
         else:
-            status, headers, body = 200, {}, {"ok": True}
+            status, headers, payload = 200, {}, {"ok": True}
 
-        payload = json.dumps(body).encode("utf-8")
+        raw = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         for k, v in (headers or {}).items():
             self.send_header(k, v)
-        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
-        self.wfile.write(payload)
+        self.wfile.write(raw)
 
     do_GET = _handle
     do_POST = _handle
@@ -57,10 +59,15 @@ class FakeServer:
     def queue(self, *responses) -> None:
         _Handler.responses.extend(responses)
         _Handler.requests.clear()
+        _Handler.bodies.clear()
 
     @property
     def requests(self) -> list:
         return _Handler.requests
+
+    @property
+    def bodies(self) -> list:
+        return _Handler.bodies
 
     def __enter__(self) -> "FakeServer":
         self.thread.start()

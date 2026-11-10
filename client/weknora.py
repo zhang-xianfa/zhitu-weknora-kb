@@ -129,27 +129,37 @@ class WeKnoraClient:
 
     def request(self, method: str, path: str, *, json_body: dict | None = None,
                 params: dict | None = None, files: dict | None = None,
-                data: dict | None = None) -> dict:
+                files_factory=None, data: dict | None = None) -> dict:
+        """发一次请求，失败按策略重试。
+
+        ``files_factory`` 是为**上传重试**准备的：文件句柄是一次性的，第一次请求
+        读到底之后不会自动回到开头，重试时再传同一个句柄，上游收到的是一个空文件
+        ——上传接口返回 200、知识库里却没有内容，这种"静默损坏"比直接报错难查得多。
+        所以带文件的上传一律传工厂函数，每次重试重新打开。
+        """
         if self.breaker.is_open:
             raise CircuitOpenError("熔断中：上游连续失败，%.0f 秒后再试" % self.config.breaker_cooldown)
 
         url = self.config.base_url.rstrip("/") + path
         headers = None
-        if files is not None:
+        if files is not None or files_factory is not None:
             headers = {"Content-Type": None}  # 交给 requests 生成 multipart 边界
 
         self.last_retry_count = 0
         for attempt in range(self.config.max_retries + 1):
             self.bucket.acquire()
+            payload = files_factory() if files_factory is not None else files
             try:
                 resp = self.session.request(
                     method, url, json=json_body, params=params,
-                    files=files, data=data, headers=headers,
+                    files=payload, data=data, headers=headers,
                     timeout=(self.config.connect_timeout, self.config.read_timeout),
                 )
             except (requests.Timeout, requests.ConnectionError) as e:
+                _close_files(payload)
                 self._on_retryable(e, attempt)
                 continue
+            _close_files(payload)
 
             if resp.status_code in _RETRYABLE_STATUS:
                 # 429 优先按 Retry-After 等，没有就用退避
@@ -203,14 +213,13 @@ class WeKnoraClient:
         data = self.request("GET", f"/knowledge-bases/{kb_id}/knowledge")
         return _as_list(data)
 
-    def upload_file(self, kb_id: str, path: Path) -> dict:
+    def upload_file(self, kb_id: str, path: Path, title: str = "") -> dict:
         """上传一个文档到知识库（multipart）。"""
-        with open(path, "rb") as f:
-            return self.request(
-                "POST", f"/knowledge-bases/{kb_id}/knowledge/file",
-                files={"file": (path.name, f)},
-                data={"title": path.stem},
-            )
+        return self.request(
+            "POST", f"/knowledge-bases/{kb_id}/knowledge/file",
+            files_factory=lambda: _open_files(path),
+            data={"title": title or path.stem},
+        )
 
     def search(self, query: str, kb_ids: list[str], match_count: int = 5) -> dict:
         return self.request("POST", "/knowledge-search", json_body={
@@ -225,16 +234,21 @@ class WeKnoraClient:
 
     # ── 幂等入库 ──────────────────────
 
-    def upload_if_changed(self, kb_id: str, path: Path) -> dict:
-        """内容没变就跳过。返回 {"status": "uploaded"/"skipped", ...}。"""
-        digest = _sha256(path)
+    def upload_if_changed(self, kb_id: str, path: Path, *, mode: str = "raw",
+                          digest: str = "", title: str = "") -> dict:
+        """内容没变就跳过。返回 {"status": "uploaded"/"skipped", ...}。
+
+        ``mode`` 进状态键：同一份源文件用不同入库方式（原样上传 / 上传清洗稿 / 上传切块）
+        产出的知识条目完全不同，不能因为"源文件没变"就跳过。
+        """
+        digest = digest or _sha256(path)
         state = self._load_state()
-        key = f"{kb_id}:{path.resolve()}"
+        key = f"{kb_id}:{mode}:{path.resolve()}"
         if state.get(key, {}).get("sha256") == digest:
             return {"status": "skipped", "reason": "内容未变化", "sha256": digest}
-        resp = self.upload_file(kb_id, path)
+        resp = self.upload_file(kb_id, path, title=title)
         state[key] = {"sha256": digest, "uploaded_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                      "knowledge_id": _find_knowledge_id(resp)}
+                      "mode": mode, "name": path.name, "knowledge_id": _find_knowledge_id(resp)}
         self._save_state(state)
         return {"status": "uploaded", "response": resp, "sha256": digest}
 
@@ -253,6 +267,21 @@ class WeKnoraClient:
 
 
 # ── 工具函数 ──────────────────────────
+
+def _open_files(path: Path) -> dict:
+    return {"file": (path.name, open(path, "rb"))}
+
+
+def _close_files(payload) -> None:
+    """关闭本次请求打开的文件句柄：重试会重新打开，不关就会泄漏句柄。"""
+    for value in (payload or {}).values():
+        handle = value[1] if isinstance(value, (tuple, list)) and len(value) > 1 else value
+        if hasattr(handle, "close"):
+            try:
+                handle.close()
+            except OSError:
+                pass
+
 
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()

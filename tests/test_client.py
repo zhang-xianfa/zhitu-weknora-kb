@@ -79,3 +79,35 @@ def test_upload_if_changed_skips_same_content(tmp_path):
         doc.write_text("第一章 总则（修订）", encoding="utf-8")
         server.queue((200, {}, {"id": "k-2"}))
         assert client.upload_if_changed("kb1", doc)["status"] == "uploaded"
+
+
+def test_upload_retry_resends_whole_file(tmp_path):
+    """重试必须重新打开文件句柄：否则第二次上传的是空文件，上游还返回 200。"""
+    content = "第一章 总则\n" + "内容" * 200
+    doc = tmp_path / "制度.md"
+    doc.write_text(content, encoding="utf-8")
+
+    with FakeServer() as server:
+        server.queue((500, {}, {"error": "boom"}), (200, {}, {"id": "k-1"}))
+        client = make_client(server)
+        client.state_file = tmp_path / "state.json"
+        assert client.upload_if_changed("kb1", doc)["status"] == "uploaded"
+        assert len(server.bodies) == 2
+        assert "内容".encode("utf-8") * 200 in server.bodies[0]
+        assert "内容".encode("utf-8") * 200 in server.bodies[1]
+        assert len(server.bodies[1]) > 100      # 第二次不是空壳
+
+
+def test_upload_mode_is_part_of_identity(tmp_path):
+    """同一份源文件、不同入库方式，产出的知识条目不同，不能互相跳过。"""
+    doc = tmp_path / "制度.md"
+    doc.write_text("第一章 总则", encoding="utf-8")
+
+    with FakeServer() as server:
+        server.queue((200, {}, {"id": "k-1"}), (200, {}, {"id": "k-2"}))
+        client = make_client(server)
+        client.state_file = tmp_path / "state.json"
+        assert client.upload_if_changed("kb1", doc, mode="raw")["status"] == "uploaded"
+        assert client.upload_if_changed("kb1", doc, mode="cleaned")["status"] == "uploaded"
+        assert client.upload_if_changed("kb1", doc, mode="cleaned")["status"] == "skipped"
+        assert len(server.requests) == 2
