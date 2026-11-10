@@ -18,7 +18,9 @@ import argparse
 import statistics
 import sys
 import time
+from pathlib import Path
 
+from client.responses import has_content
 from client.weknora import WeKnoraClient, WeKnoraError
 
 DEFAULT_QUERIES = ["请假流程是什么", "报销需要哪些材料", "审批权限"]
@@ -70,7 +72,7 @@ def check(client: WeKnoraClient, kb_id: str, queries: list[str]) -> tuple[int, l
         except WeKnoraError as e:
             warnings.append(f"检索失败「{q}」：{e}")
             continue
-        if not _has_content(chunks):
+        if not has_content(chunks):
             empty += 1
     if queries and empty == len(queries):
         problems.append("所有样例查询都空召回：优先查分块/清洗是否把内容洗掉、索引是否建完")
@@ -100,9 +102,28 @@ def check(client: WeKnoraClient, kb_id: str, queries: list[str]) -> tuple[int, l
 
 
 def _has_content(resp) -> bool:
-    """判断检索响应里有没有实际的块。"""
-    from eval.runner import extract_chunks, chunk_text
-    return any(chunk_text(c) for c in extract_chunks(resp))
+    """兼容旧调用点：真正的空召回判定在 client.responses，这里只是别名。"""
+    return has_content(resp)
+
+
+def check_ledger(path: Path) -> tuple[int, list[str]]:
+    """查上一批入库有没有失败：比人工问"都传上去了吗"可靠。
+
+    台账单独查而不是塞进入库脚本：入库脚本跑完就退出，事后再看执行记录的是运维，
+    而运维不一定愿意重跑一遍入库。退出码 2 表示告警（有失败），不阻断自检的其他项。
+    """
+    from pipeline.ledger import BatchLedger
+
+    ledger = BatchLedger(path)
+    batch_id = ledger.last_batch()
+    if not batch_id:
+        return 2, [f"批次台账为空或不存在：{path}"]
+    summary = ledger.summary(batch_id)
+    print(f"[台账] 批次 {batch_id}：{summary['文件数']} 个文件、{summary['块数']} 块")
+    if summary["失败"]:
+        return 2, [f"批次 {batch_id} 有 {len(summary['失败'])} 个文件入库失败："
+                   + "、".join(summary["失败"][:5])]
+    return 0, []
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -111,6 +132,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--api-key", default=None)
     parser.add_argument("--kb-id", default="")
     parser.add_argument("--queries", nargs="*", default=DEFAULT_QUERIES)
+    parser.add_argument("--ledger", default="", help="批次台账路径（给出则检查上一批入库是否全部成功）")
     args = parser.parse_args(argv)
 
     from client.weknora import ClientConfig
@@ -122,6 +144,11 @@ def main(argv: list[str] | None = None) -> int:
 
     client = WeKnoraClient(config)
     code, messages = check(client, args.kb_id, args.queries)
+
+    if args.ledger:
+        ledger_code, ledger_messages = check_ledger(Path(args.ledger))
+        code = max(code, ledger_code)
+        messages.extend(ledger_messages)
 
     if messages:
         print("\n输出：")
