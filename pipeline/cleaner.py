@@ -24,11 +24,24 @@ _HEADER_FOOTER = [
     re.compile(r"^\s*目\s*录\s*$"),
 ]
 #: 文档元信息：从正文里摘出来，单独拼成一块（版本/生效日期恰恰是"时效类"问题的答案）
-_META = re.compile(r"^\s*(文件编号|版本号|生效日期|发布部门)\s*[:：]\s*(.+?)\s*$")
+#: 密级与适用范围不只是"展示信息"：它们决定这条内容能不能进谁的上下文（见 pipeline/security.py）
+_META = re.compile(
+    r"^\s*(文件编号|文档编号|版本号|版本|生效日期|发布日期|失效日期|发布部门|适用部门|适用范围|密级)"
+    r"\s*[:：]\s*(.+?)\s*$"
+)
+#: 元信息键的规范名：同一份文档常写成"生效日期"或"发布日期"，下游按规范名取
+META_ALIASES = {
+    "文档编号": "文件编号",
+    "版本": "版本号",
+    "发布日期": "生效日期",
+    "适用部门": "适用范围",
+}
 #: 签署栏：对问答无用，直接丢
 _SIGN = re.compile(r"^\s*(编制|审核|批准|签发)\s*[:：].*$")
-# 目录行：正文 + 省略号 + 页码
-_TOC_LINE = re.compile(r".+[.·…]{3,}\s*\d+\s*$")
+# 目录行：正文 + 省略号 + 页码。
+# 省略号有 "."（英文点）、"·"（间隔号）、"…"（省略号）三种排版，中文排版常用两个"…"，
+# 所以量词用 2 起步——之前依赖 NFKC 把"……"折成"..."才能匹配，归一化规则一改就会漏。
+_TOC_LINE = re.compile(r".+[.·…]{2,}\s*\d+\s*$")
 # 中文条款编号："第 三 条" → "第三条"
 _CLAUSE_GAP = re.compile(r"(第)\s+([一二三四五六七八九十百零〇\d]+)\s+(条|章|节|款)")
 # 编号与序号之间的多余空格："1. 1. 1" → "1.1.1"
@@ -59,11 +72,28 @@ class CleanReport:
 
 
 def normalize(text: str) -> str:
-    """全角转半角、去掉零宽字符、统一换行。"""
-    text = unicodedata.normalize("NFKC", text)
-    text = text.replace("​", "").replace("﻿", "")
+    """统一换行、去掉零宽字符、把**全角字母数字和空白**折成半角。
+
+    这里刻意**不用整段 NFKC**：NFKC 会把中文全角标点一起改掉
+    （"第1条，应当：报销（含税）" → "第1条,应当:报销(含税)"）。标点虽然不进分词，
+    但它会让引用给用户看的原文变样、也让"和原文逐字比对"的核对/审计报告失真。
+
+    只折"看起来一样、编码不同"的字符：全角数字、全角字母、全角空格——
+    它们才是"第５条"和"第5条"被当成两个词的原因。
+    """
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    return text
+    text = text.replace("​", "").replace("﻿", "").replace("‌", "")
+    return "".join(_fold_char(ch) for ch in text)
+
+
+def _fold_char(ch: str) -> str:
+    """单字符宽度归一：只处理空白与全角字母数字，中文标点原样保留。"""
+    if ch.isascii():
+        return ch
+    if ch.isspace():                 # 含 U+3000 全角空格
+        return " "
+    folded = unicodedata.normalize("NFKC", ch)
+    return folded if folded.isascii() and folded.isalnum() else ch
 
 
 def normalize_clause_numbering(text: str) -> str:
@@ -90,7 +120,8 @@ def clean(text: str, title: str = "") -> tuple[str, CleanReport]:
 
         meta = _META.match(line)
         if meta:
-            report.metadata.setdefault(meta.group(1), meta.group(2))
+            key = META_ALIASES.get(meta.group(1), meta.group(1))
+            report.metadata.setdefault(key, meta.group(2))
             continue
         if _SIGN.match(line) or any(p.match(line) for p in _HEADER_FOOTER):
             report.dropped_header_footer += 1

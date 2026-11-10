@@ -1,5 +1,5 @@
-from pipeline.chunker import chunk_document
-from pipeline.cleaner import clean
+from pipeline.chunker import _parse_heading, chunk_document
+from pipeline.cleaner import clean, normalize
 
 DOC = """内部资料，请勿外传
 测试管理办法
@@ -91,3 +91,42 @@ def test_every_chunk_within_short_clause_keeps_prefix():
     for c in chunks:
         if c.heading_path != "（无标题）":
             assert c.text.startswith("【")
+
+
+def test_normalize_keeps_chinese_punctuation():
+    """只折全角字母数字与空白；中文标点原样保留，引用原文才不会变形。"""
+    assert normalize("第５条，应当：报销（含税）；金额≤200元　共 2 项") == \
+        "第5条，应当：报销（含税）；金额≤200元 共 2 项"
+    assert normalize("ＡＢＣ１２３") == "ABC123"
+
+
+def test_toc_with_double_ellipsis_is_dropped():
+    """中文排版常写"……"，不能只认英文 "..."。"""
+    body, report = clean("第一章 总则 …… 1\n第二章 流程 …… 2\n正文", title="x")
+    assert report.dropped_toc == 2
+    assert "第一章" not in body
+
+
+def test_value_lines_are_not_mistaken_for_headings():
+    """制度里的"1.5 倍""3.5 天"是正文数值，误判成标题会打断整棵层级树。"""
+    for text in ("1.5 倍报销", "3.5 天年假", "2.5 小时通勤", "3.2 元每公里"):
+        assert _parse_heading(text) is None, text
+    assert _parse_heading("1.1 总则") is not None
+    assert _parse_heading("2、审批流程") is not None
+
+
+def test_merge_keeps_later_clause_number_in_text():
+    """同章短块合并后，被并入条款的编号要留在正文里，否则条款级引用会串号。"""
+    body, _ = clean(DOC, title="测试管理办法")
+    chunks = chunk_document("测试管理办法", body, max_chars=600, overlap=0)
+    assert any("第2条" in c.text for c in chunks), "被合并的条款号丢了"
+
+
+def test_chunk_uid_is_stable_and_content_sensitive():
+    text = "第一章 总则\n第1条 甲规定。\n第2条 乙规定。"
+    first = chunk_document("d1", text, max_chars=600)
+    same = chunk_document("d1", text, max_chars=600)
+    changed = chunk_document("d1", text.replace("甲规定", "甲修改"), max_chars=600)
+    assert [c.uid for c in first] == [c.uid for c in same]
+    assert first[0].uid != changed[0].uid
+    assert len({c.uid for c in first}) == len(first)
