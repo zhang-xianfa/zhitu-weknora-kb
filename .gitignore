@@ -5,10 +5,20 @@
 # 运行产物
 .weknora_state.json
 eval/report/
+eval/cases/field_candidates.json
 *.jsonl
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# 入库中间产物：清洗稿/切块/批次台账/策略清单都是可重算的，不进仓库
+data/staging/
+data/ledger/
+data/policies.json
+data/tables.json
+data/tables.csv
+# 业务指标需要样例日志做验收：保留这一个，其余 jsonl 仍忽略
+!data/interactions.example.jsonl
 
 # 部署时挂载的文档目录
 deploy/files/
