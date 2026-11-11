@@ -37,7 +37,12 @@ from pathlib import Path
 
 from eval.metrics import percentile
 
-_WS = re.compile(r"\s+")
+_WS = re.compile(r"[\s？?！!。.，,；;：:、\"'“”‘’]+")
+
+
+def _question_key(text: str) -> str:
+    """问题归一：去空白与常见标点，让"年假多少天"和"年假多少天？"算同一个问题。"""
+    return _WS.sub("", str(text or "")).lower()
 
 
 def parse_ts(value) -> datetime | None:
@@ -78,6 +83,7 @@ class Interaction:
     question: str
     ts: datetime | None = None
     user_id: str = ""
+    department: str = ""
     answered: bool = True
     refused: bool = False
     useful: bool | None = None
@@ -114,6 +120,7 @@ def load_interactions(path: Path) -> list[Interaction]:
             question=question,
             ts=parse_ts(row.get("ts")),
             user_id=str(row.get("user_id") or ""),
+            department=str(row.get("department") or row.get("dept") or row.get("部门") or ""),
             answered=_as_bool(row.get("answered"), default=True) and not refused,
             refused=refused,
             useful=_as_useful(row.get("useful")),
@@ -141,7 +148,7 @@ def mark_repeats(items: list[Interaction], window_days: int = 7) -> None:
     last: dict[tuple[str, str], float] = {}
     window = window_days * 86400
     for item in order:
-        key = (item.user_id or "-", _WS.sub("", item.question))
+        key = (item.user_id or "-", _question_key(item.question))
         if item.ts is None:
             continue
         current = item.ts.timestamp()
@@ -196,6 +203,53 @@ def summarize(items: list[Interaction], *, price_in: float = 0.0, price_out: flo
     return summary
 
 
+def department_summary(items: list[Interaction], *, price_in: float = 0.0,
+                       price_out: float = 0.0, repeat_window_days: int = 7) -> dict[str, dict]:
+    """按部门拆一份：谁在用、谁在转人工、谁的答案是"没用"的。
+
+    总账只能回答"这个系统好不好"，分部门才能回答"先给谁补文档、先找谁做培训"。
+    重复提问在部门内判定（同一部门同一问题），跨部门的相同问题不算重复。
+    """
+    groups: dict[str, list[Interaction]] = {}
+    for item in items:
+        groups.setdefault(item.department or "未标注", []).append(item)
+    return {
+        dept: summarize(group, price_in=price_in, price_out=price_out,
+                        repeat_window_days=repeat_window_days)
+        for dept, group in groups.items()
+    }
+
+
+def top_problems(items: list[Interaction], limit: int = 5) -> list[dict]:
+    """把"没用/转人工/拒答"的问题聚合成高频清单，直接作为 badcase 候选。
+
+    单条反馈看不出趋势，聚合成"同一个问题被多少人问、为什么不行"，
+    才知道该补文档（拒答多）还是改答案（转人工多）。
+    """
+    grouped: dict[str, dict] = {}
+    for item in items:
+        reasons = []
+        if item.refused:
+            reasons.append("拒答")
+        if item.useful is False:
+            reasons.append("没用")
+        if item.transferred:
+            reasons.append("转人工")
+        if not reasons:
+            continue
+        key = _question_key(item.question)
+        entry = grouped.setdefault(key, {"question": item.question, "count": 0,
+                                         "reasons": set(), "departments": set()})
+        entry["count"] += 1
+        entry["reasons"].update(reasons)
+        if item.department:
+            entry["departments"].add(item.department)
+    rows = sorted(grouped.values(), key=lambda x: (-x["count"], x["question"]))[:limit]
+    return [{"question": row["question"], "count": row["count"],
+             "reasons": sorted(row["reasons"]),
+             "departments": sorted(row["departments"])} for row in rows]
+
+
 def insights_notes(summary: dict) -> list[str]:
     """把指标翻译成运营动作。纯阈值判断，不涉及模型。"""
     notes: list[str] = []
@@ -237,6 +291,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--price-out", type=float, default=0.0, help="输出单价（元 / 千 tokens）")
     parser.add_argument("--monthly-volume", type=int, default=0, help="按月问答量估算成本")
     parser.add_argument("--repeat-window-days", type=int, default=7)
+    parser.add_argument("--by-department", action="store_true", help="按部门拆一张表")
+    parser.add_argument("--top", type=int, default=5, help="高频问题条数，0 表示不列")
     parser.add_argument("--json", default="", help="把汇总写成 JSON")
     parser.add_argument("--export-feedback", default="",
                         help="把没用/转人工/拒答导成 badcase 反馈 JSONL")
@@ -258,6 +314,28 @@ def main(argv: list[str] | None = None) -> int:
     print("\n运营判读：")
     for note in insights_notes(summary):
         print(f" - {note}")
+
+    if args.by_department:
+        print("\n分部门：")
+        print("| 部门 | 问答次数 | 转人工率 | 重复提问率 | 首次解决率(代理) | 单次成本 |")
+        print("|---|---|---|---|---|---|")
+        for dept, dept_summary in department_summary(
+                items, price_in=args.price_in, price_out=args.price_out,
+                repeat_window_days=args.repeat_window_days).items():
+            first = next((v for k, v in dept_summary.items()
+                          if k.startswith("首次解决率")), 0.0)
+            print(f"| {dept} | {dept_summary['问答次数']} | {dept_summary['转人工率']} | "
+                  f"{dept_summary['重复提问率']} | {first} | {dept_summary['单次成本']} |")
+
+    if args.top:
+        problems = top_problems(items, args.top)
+        if problems:
+            print(f"\n高频问题（建议 badcase 回流，前 {len(problems)} 条）：")
+            print("| 问题 | 次数 | 原因 | 部门 |")
+            print("|---|---|---|---|")
+            for row in problems:
+                print(f"| {row['question']} | {row['count']} | "
+                      f"{'、'.join(row['reasons'])} | {'、'.join(row['departments']) or '—'} |")
 
     if not (args.price_in or args.price_out):
         print("\n提示：未配置 token 单价，成本按 0 计；用 --price-in/--price-out 传入")

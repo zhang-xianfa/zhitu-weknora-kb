@@ -1,8 +1,8 @@
 import json
 
 from ops.insights import (
-    Interaction, export_feedback, insights_notes, load_interactions, main, parse_ts,
-    summarize,
+    Interaction, department_summary, export_feedback, insights_notes, load_interactions,
+    main, parse_ts, summarize, top_problems,
 )
 
 
@@ -77,6 +77,31 @@ def test_export_feedback_for_badcase(tmp_path):
     assert all("question" in row for row in rows)
 
 
+def test_department_summary_and_top_problems():
+    items = [
+        Interaction(question="年假多少天", user_id="u1", department="财务部",
+                    refused=True, answered=False),
+        Interaction(question="年假多少天？", user_id="u2", department="HR",
+                    refused=True, answered=False),
+        Interaction(question="住宿标准", user_id="u3", department="财务部",
+                    useful=False, transferred=True),
+        Interaction(question="出差 9 天谁审批", user_id="u4", department="财务部",
+                    useful=True),
+    ]
+    by_dept = department_summary(items)
+    assert set(by_dept) == {"财务部", "HR"}
+    assert by_dept["财务部"]["问答次数"] == 3
+    assert by_dept["财务部"]["转人工率"] == round(1 / 3, 4)
+    assert by_dept["HR"]["问答次数"] == 1
+
+    problems = top_problems(items)
+    assert problems[0]["question"] == "年假多少天"       # 同一问题的两种标点被聚合
+    assert problems[0]["count"] == 2
+    assert problems[0]["reasons"] == ["拒答"]
+    assert problems[0]["departments"] == ["HR", "财务部"]
+    assert problems[1]["reasons"] == ["没用", "转人工"]
+
+
 def test_cli_writes_json_and_feedback(tmp_path, capsys):
     log = tmp_path / "log.jsonl"
     log.write_text("\n".join(
@@ -92,10 +117,11 @@ def test_cli_writes_json_and_feedback(tmp_path, capsys):
 
     code = main(["--log", str(log), "--price-in", "1", "--price-out", "2",
                  "--monthly-volume", "1000", "--json", str(out_json),
-                 "--export-feedback", str(feedback)])
+                 "--export-feedback", str(feedback), "--by-department", "--top", "3"])
     out = capsys.readouterr().out
     assert code == 0
     assert "首次解决率" in out and "运营判读" in out
+    assert "分部门" in out and "高频问题" in out
     payload = json.loads(out_json.read_text(encoding="utf-8"))
     assert payload["问答次数"] == 4 and payload["单次成本"] == 0.3
     assert len(feedback.read_text(encoding="utf-8").splitlines()) == 2
