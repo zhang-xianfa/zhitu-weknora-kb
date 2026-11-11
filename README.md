@@ -15,10 +15,10 @@
 
 | 模块 | 内容 | 是否自研 |
 |---|---|---|
-| `pipeline/` | 清洗、条款感知分块、文档体检、版本时效治理、密级准入、批次台账、表格结构化、三种入库模式 | ✅ 自研 |
+| `pipeline/` | 清洗、条款感知分块、文档体检、版本时效治理、密级准入、批次台账、表格结构化、旧块清理、三种入库模式 | ✅ 自研 |
 | `eval/` | 边界用例集、双层指标（召回率@k/MRR + 要点命中）、离线基线、**badcase 回流**、**回归门禁** | ✅ 自研 |
 | `client/` | API 客户端：超时、指数退避、限流、熔断、按模式幂等、上传重试完整性 | ✅ 自研 |
-| `ops/` | 上线自检（连通性/积压/空召回/延迟/批次）+ **发布自检** + **业务指标** + 排查手册 | ✅ 自研 |
+| `ops/` | 上线自检（连通性/积压/空召回/延迟/批次）+ **发布自检** + **业务指标（分部门/高频问题）** + 排查手册 | ✅ 自研 |
 | `deploy/` | 内网部署编排：模型/向量库指向可控地址、资源限额 | ✅ 自研（基于上游 compose） |
 | 解析、检索、问答、前端 | 文档解析、混合检索、LLM 问答、管理界面 | ❌ 上游 WeKnora 提供 |
 
@@ -127,7 +127,7 @@ python -m ops.doctor --base-url http://127.0.0.1:8080 --kb-id <id> \
   --ledger data/ledger/ingest.jsonl
 ```
 
-## 六、从"能答"到"敢用"：八条业务边界
+## 六、从"能答"到"敢用"：九条业务边界
 
 POC 能答对问题，不等于企业敢上线。真正拦着上线的问题，本仓库各落了一条：
 
@@ -139,7 +139,8 @@ POC 能答对问题，不等于企业敢上线。真正拦着上线的问题，�
 | 改完是变好还是变坏？ | 召回/要点双层指标 + 回归门禁（退化退出码 1） | `eval.regression` |
 | 用例集怎么长大？ | badcase 回流：机器整理去重、人补考点、`--merge` 入集 | `eval.badcase` |
 | 数值题算不准？ | 表格结构化 + 区间查询（"8 天及以上"能匹配 9 天） | `pipeline.tables` |
-| 答到了但没解决？ | 业务指标：首次解决率/转人工/重复提问/单次成本，可导出 badcase | `ops.insights` |
+| 答到了但没解决？ | 业务指标：首次解决率/转人工/重复提问/单次成本，可分部门、列高频问题 | `ops.insights` |
+| 文档改短后旧块还在？ | 按台账 uid 差异生成清理计划（变更/删除块清单） | `pipeline.prune` |
 | 发布前到底查什么？ | 一条命令跑完体检/版本/密级/指标四道闸 | `ops.release` |
 
 完整的业务分析与路线图（拒答分级、业务指标、成本账、组织分工、三阶段退出门槛）写在
@@ -168,6 +169,9 @@ python -m pipeline.ingest --dir data/sample --kb-id <知识库ID> \
 python -m pipeline.ingest --dir data/sample --kb-id <ID> --mode chunks
 python -m pipeline.ingest --dir data/sample --kb-id <ID> --allow-passthrough
 
+#    （可选）文档改短/删条后，按台账差异生成旧块清理计划；只出清单，不自动删
+python -m pipeline.prune --dir data/sample --ledger data/ledger/ingest.jsonl
+
 # 5) 数值题旁路：区间查询，不让模型读表硬算
 python -m pipeline.tables --dir data/sample --query "出差天数=9"
 python -m pipeline.tables --dir data/sample --json data/tables.json --csv data/tables.csv
@@ -177,9 +181,10 @@ python -m eval.runner --cases eval/cases/enterprise_policy.json --kb-id <知识�
   --policies data/policies.json --clearance 内部
 python -m eval.regression --baseline eval/baseline/offline.json --current eval/report/offline.json
 
-# 7) 业务指标（用仓库里的样例日志试跑；可把"没用/转人工"导出成 badcase）
+# 7) 业务指标（用仓库里的样例日志试跑；可分部门、列高频问题、导出 badcase）
 python -m ops.insights --log data/interactions.example.jsonl \
-  --price-in 0.002 --price-out 0.008 --monthly-volume 10000
+  --price-in 0.002 --price-out 0.008 --monthly-volume 10000 \
+  --by-department --top 5
 
 # 8) 发布自检：体检 + 版本 + 密级 + 指标，一条命令出结论（可进 CI）
 python -m ops.release --dir data/sample
@@ -199,7 +204,7 @@ pytest -q
 
 ```
 client/      WeKnora API 客户端（重试/限流/熔断/错误分类/响应适配/上传完整性）
-pipeline/    清洗 → 分块 → 体检 → 版本/密级准入 → 表格结构化 → 入库 → 批次台账
+pipeline/    清洗 → 分块 → 体检 → 版本/密级准入 → 表格结构化 → 入库 → 批次台账 → 旧块清理计划
 eval/        评测用例、指标（召回+要点）、离线基线、badcase 回流、回归门禁
 ops/         上线自检（doctor）、发布自检（release）、业务指标（insights）与排查
 deploy/      docker compose 与内网配置
@@ -223,5 +228,6 @@ tests/       单元测试（含 mock 服务端，离线可跑）
   查询只做等值/区间/包含，不做聚合与跨表 join——那些应该进数据库；
 - 业务指标是**代理口径**：首次解决率靠"有用+未转人工+未重复"近似，没有接工单系统；
   评分覆盖率低时该指标不可信，报告里会直接标出来；
-- `--mode chunks` 按块上传后，文档变短时旧块不会自动清理（需要按台账差异做 prune，未实现）；
+- 旧块清理只出**计划**（`pipeline.prune`），删除仍需在 WeKnora 管理端/API 执行；
+  raw/cleaned 模式的引用标题由上游解析器决定，该模式下清单只能参考、不能直接当删除指令；
 - 回归门禁目前只卡离线召回基线，chat 模式因成本原因按发版频率跑。
